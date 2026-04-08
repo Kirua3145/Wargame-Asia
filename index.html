@@ -1,0 +1,1716 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SOUTH CHINA SEA CRISIS — Multijoueur</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getDatabase, ref, set, get, onValue, update, push, serverTimestamp }
+  from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
+
+// ╔══════════════════════════════════════════════════════╗
+// ║  🔥 FIREBASE CONFIG — REMPLACE CES VALEURS          ║
+// ║  1. Va sur https://console.firebase.google.com       ║
+// ║  2. Crée un projet → Realtime Database               ║
+// ║  3. Copie ta config ici                              ║
+// ╚══════════════════════════════════════════════════════╝
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAoEDYhH3xsVCw7zrwodeDVKpG8DM85490",
+  authDomain: "wargame-ca2f2.firebaseapp.com",
+  databaseURL: "wargame-ca2f",
+  projectId: "wargame-ca2f2.firebasestorage.app",
+  storageBucket: "1020610094666",
+  messagingSenderId: "1:1020610094666:web:5b8d9f8d8e866abcf7a8b3",
+  appId: "G-NJDKJGCZRC"
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// GAME STATE
+// ══════════════════════════════════════════════════════════════════════
+let app, db, gameRef, unsubscribers = [];
+let myFaction = null; // 'pla' | 'us'
+let myRoomCode = null;
+let isOnlineMode = false;
+let localMode = false; // local 2-player hotseat
+let selectedUnit = null;
+let selectedHex = null;
+let mapInstance = null;
+let hexLayer = null;
+let unitMarkers = {};
+let animating = false;
+
+const GAME_VERSION = '2.0';
+
+// ══════════════════════════════════════════════════════════════════════
+// INITIAL GAME STATE
+// ══════════════════════════════════════════════════════════════════════
+function createInitialState() {
+  return {
+    version: GAME_VERSION,
+    turn: 1,
+    maxTurns: 10,
+    phase: 1, // 1=initiative 2=ISR 3=planning 4=movement 5=combat 6=events 7=supply 8=score
+    phaseNames: {
+      1:'INITIATIVE',2:'RENSEIGNEMENT',3:'PLANIFICATION',
+      4:'MOUVEMENT',5:'COMBAT',6:'ÉVÉNEMENTS',7:'RAVITAILLEMENT',8:'SCORE'
+    },
+    currentPlayer: 'pla', // whose turn to act
+    initiative: null, // 'pla' or 'us'
+    initiativeRolls: { pla: null, us: null },
+    escalade: 3,
+    vpScore: 15, // starts neutral; goes up=PLA wins, down=US wins
+    resources: {
+      pla: { ashm: 14, fuel: 10, amphi: 4 },
+      us:  { lrasm: 12, fuel: 12, tlam: 8, amphi: 6 }
+    },
+    readyPlayers: { pla: false, us: false },
+    planningOrders: { pla: null, us: null },
+    units: createInitialUnits(),
+    log: [],
+    chat: [],
+    events: { pla: [], us: [], neutral: [] },
+    drawnEvents: [],
+    objectives: createObjectives(),
+    gameOver: false,
+    winner: null,
+    timestamp: null
+  };
+}
+
+function createInitialUnits() {
+  const plaUnits = [
+    { id:'pla1', faction:'pla', name:'FUJIAN CVN', type:'carrier',   sym:'carrier',   atk:8,def:6,mov:4,rng:4,maxPv:4,pv:4, hex:null, lat:21.5, lng:111.5, suppressed:false, isolated:false, special:'CATOBAR 60×J-35A. Zone anti-accès 4hex.' },
+    { id:'pla2', faction:'pla', name:'TYPE 055',   type:'destroyer',  sym:'destroyer', atk:9,def:5,mov:5,rng:5,maxPv:3,pv:3, hex:null, lat:20.8, lng:112.0, suppressed:false, isolated:false, special:'HHQ-9B ×128 VLS. AESA radar.' },
+    { id:'pla3', faction:'pla', name:'TYPE 052D',  type:'destroyer',  sym:'destroyer', atk:7,def:4,mov:6,rng:4,maxPv:3,pv:3, hex:null, lat:21.2, lng:111.8, suppressed:false, isolated:false, special:'+1 DEF en réseau ZHY-63.' },
+    { id:'pla4', faction:'pla', name:'TYPE 075',   type:'amphibious', sym:'amphibious',atk:4,def:5,mov:3,rng:1,maxPv:4,pv:4, hex:null, lat:20.5, lng:111.3, suppressed:false, isolated:false, special:'Débarque 2 unités/tour. 30×Z-20.' },
+    { id:'pla5', faction:'pla', name:'J-35A',      type:'fighter',    sym:'fighter',   atk:8,def:6,mov:8,rng:4,maxPv:2,pv:2, hex:null, lat:22.0, lng:113.5, suppressed:false, isolated:false, special:'Furtif (D6≥5). 2 missions/tour.' },
+    { id:'pla6', faction:'pla', name:'H-6N',       type:'bomber',     sym:'bomber',    atk:10,def:3,mov:5,rng:6,maxPv:2,pv:2, hex:null, lat:22.5, lng:114.0, suppressed:false, isolated:false, special:'YJ-21 hypersonique. Ignore SAM D6≥4.' },
+    { id:'pla7', faction:'pla', name:'J-16D EW',   type:'ew',         sym:'ew',        atk:3,def:5,mov:7,rng:3,maxPv:2,pv:2, hex:null, lat:21.8, lng:113.0, suppressed:false, isolated:false, special:'Brouillage –2 RNG missiles (3hex,2tours).' },
+    { id:'pla8', faction:'pla', name:'PLA MARINES',type:'infantry',   sym:'infantry',  atk:5,def:5,mov:2,rng:1,maxPv:3,pv:3, hex:null, lat:20.3, lng:111.0, suppressed:false, isolated:false, special:'Assaut amphibie depuis TYPE 075.' },
+    { id:'pla9', faction:'pla', name:'HHQ-9B SAM', type:'sam',        sym:'sam',       atk:6,def:4,mov:1,rng:5,maxPv:2,pv:2, hex:null, lat:9.55, lng:112.89, suppressed:false, isolated:false, special:'Interception D6≥3. IADS réseau.' },
+    { id:'pla10',faction:'pla', name:'TYPE 039C',  type:'submarine',  sym:'submarine', atk:7,def:7,mov:5,rng:3,maxPv:3,pv:3, hex:null, lat:19.0, lng:112.5, suppressed:false, isolated:false, hidden:true, special:'Furtif. Torpilles Yu-6.' },
+    { id:'pla11',faction:'pla', name:'WZ-8 DRONE', type:'drone',      sym:'drone',     atk:0,def:2,mov:9,rng:6,maxPv:1,pv:1, hex:null, lat:22.2, lng:112.8, suppressed:false, isolated:false, special:'ISR: révèle 4hex. Vitesse M6.' },
+    { id:'pla12',faction:'pla', name:'PLZ-07B',    type:'arty',       sym:'arty',      atk:8,def:3,mov:2,rng:4,maxPv:2,pv:2, hex:null, lat:9.55, lng:112.90,suppressed:false, isolated:false, special:'Frappe indirecte île +3ATK.' },
+  ];
+  const usUnits = [
+    { id:'us1',  faction:'us', name:'USS FORD',     type:'carrier',   sym:'carrier',   atk:9,def:7,mov:4,rng:5,maxPv:4,pv:4, hex:null, lat:10.5, lng:121.0, suppressed:false, isolated:false, special:'CBG Zone anti-accès 5hex. 90 aéronefs.' },
+    { id:'us2',  faction:'us', name:'ARLEIGH BURKE',type:'destroyer', sym:'destroyer', atk:8,def:5,mov:6,rng:5,maxPv:3,pv:3, hex:null, lat:10.8, lng:121.5, suppressed:false, isolated:false, special:'Aegis D6≥3 interception. VLS×96.' },
+    { id:'us3',  faction:'us', name:'SSN VIRGINIA', type:'submarine', sym:'submarine', atk:9,def:8,mov:7,rng:4,maxPv:3,pv:3, hex:null, lat:11.0, lng:122.0, suppressed:false, isolated:false, hidden:true, special:'Furtif (D6≥6). TLAM depuis immergé.' },
+    { id:'us4',  faction:'us', name:'USS AMERICA',  type:'amphibious',sym:'amphibious',atk:5,def:6,mov:3,rng:2,maxPv:4,pv:4, hex:null, lat:10.2, lng:120.5, suppressed:false, isolated:false, special:'F-35B embarqués. +2ATK assaut.' },
+    { id:'us5',  faction:'us', name:'F-35C',        type:'fighter',   sym:'fighter',   atk:9,def:7,mov:8,rng:5,maxPv:2,pv:2, hex:null, lat:13.4, lng:144.8, suppressed:false, isolated:false, special:'Furtif (D6≥5). –2ATK ennemis adj.' },
+    { id:'us6',  faction:'us', name:'EA-18G',       type:'ew',        sym:'ew',        atk:4,def:5,mov:7,rng:4,maxPv:2,pv:2, hex:null, lat:13.5, lng:144.5, suppressed:false, isolated:false, special:'ALQ-99: –3RNG SAM ennemi.' },
+    { id:'us7',  faction:'us', name:'P-8A POSEIDON',type:'maritime',  sym:'maritime',  atk:5,def:3,mov:7,rng:4,maxPv:2,pv:2, hex:null, lat:13.2, lng:144.9, suppressed:false, isolated:false, special:'ASW D6≥3 à 3hex. ISR maritime.' },
+    { id:'us8',  faction:'us', name:'USMC MARINES', type:'infantry',  sym:'infantry',  atk:6,def:6,mov:2,rng:2,maxPv:3,pv:3, hex:null, lat:10.0, lng:120.2, suppressed:false, isolated:false, special:'Javelin. +3DEF côtière.' },
+    { id:'us9',  faction:'us', name:'PATRIOT PAC-3',type:'sam',       sym:'sam',       atk:7,def:4,mov:1,rng:5,maxPv:2,pv:2, hex:null, lat:14.5, lng:121.0, suppressed:false, isolated:false, special:'Interception D6≥3. THAAD compatible.' },
+    { id:'us10', faction:'us', name:'MQ-9B REAPER', type:'drone',     sym:'drone',     atk:5,def:2,mov:7,rng:3,maxPv:1,pv:1, hex:null, lat:13.6, lng:144.6, suppressed:false, isolated:false, special:'Hellfire×8. ISR 48h continu.' },
+    { id:'us11', faction:'us', name:'B-2A SPIRIT',  type:'bomber',    sym:'bomber',    atk:12,def:5,mov:6,rng:5,maxPv:2,pv:2, hex:null, lat:13.4, lng:144.8, suppressed:false, isolated:false, usedOnce:false, special:'Furtif total (D6≥6). GBU-57. 1×/partie.' },
+    { id:'us12', faction:'us', name:'USS ZUMWALT',  type:'destroyer', sym:'destroyer', atk:8,def:6,mov:6,rng:4,maxPv:3,pv:3, hex:null, lat:11.2, lng:121.8, suppressed:false, isolated:false, special:'–2ATK ennemi. LRASM×80.' },
+  ];
+  const units = {};
+  [...plaUnits, ...usUnits].forEach(u => { units[u.id] = u; });
+  return units;
+}
+
+function createObjectives() {
+  return {
+    fiery_cross:  { id:'fiery_cross',  name:'Fiery Cross Reef', lat:9.555,  lng:112.895, vp:5, controller:null, faction_required:null },
+    mischief_reef:{ id:'mischief_reef',name:'Mischief Reef',    lat:9.9,   lng:115.53,  vp:4, controller:'pla', faction_required:null },
+    subi_reef:    { id:'subi_reef',    name:'Subi Reef',        lat:10.92, lng:114.08,  vp:3, controller:'pla', faction_required:null },
+    thitu_island: { id:'thitu_island', name:'Thitu Island',     lat:11.05, lng:114.28,  vp:2, controller:'us',  faction_required:null },
+    palawan:      { id:'palawan',      name:'Palawan Strait',   lat:10.5,  lng:119.5,   vp:2, controller:'us',  faction_required:null },
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// EVENT CARDS
+// ══════════════════════════════════════════════════════════════════════
+const EVENT_DECK = {
+  neutral: [
+    { id:'ev_n1', title:'Typhon Tropical',     effect:'mov_penalty',  desc:'Tous navires –2 MOV ce tour. Strike annulé.', escalade:0 },
+    { id:'ev_n2', title:'Négociation ONU',     effect:'escalade_down',desc:'Escalade –1. Aucune offensive ce tour.', escalade:-1 },
+    { id:'ev_n3', title:'Incident Médiatique', effect:'vp_penalty',   desc:'Escalade +1. Le camp attaquant perd 1PV.', escalade:1 },
+    { id:'ev_n4', title:'Panne Électronique',  effect:'atk_debuff',   desc:'1 navire adverse aléatoire: –2ATK 2 tours.', escalade:0 },
+    { id:'ev_n5', title:'Brouillard de Guerre',effect:'no_network',   desc:'Pas de bonus réseau ni CAS ce tour.', escalade:0 },
+    { id:'ev_n6', title:'Renforts Australiens',effect:'us_reinforce', desc:'US reçoit 2 frégates ANZAC (ATK5 DEF4).', escalade:0 },
+    { id:'ev_n7', title:'Tremblement de Terre',effect:'phil_inactive',desc:'Philippines inactives 2 tours. Escalade –1.', escalade:-1 },
+    { id:'ev_n8', title:'Satellite Brouillé',  effect:'no_isr',       desc:'ISR annulé 1 tour (jet D6: pair=PLA).', escalade:0 },
+    { id:'ev_n9', title:'Pétrole Détroit',     effect:'slow_strait',  desc:'–1 MOV passage Détroit de Malacca · 3 tours.', escalade:0 },
+    { id:'ev_n10',title:'Fuite Diplomatique',  effect:'reveal_orders',desc:'Les deux joueurs révèlent leurs ordres suivants.', escalade:0 },
+  ],
+  pla: [
+    { id:'ev_p1', title:'DF-21D Saturation',   effect:'anti_carrier', desc:'Attaque PA US portée 6. –2PV si D6≥3.', escalade:1 },
+    { id:'ev_p2', title:'Déploiement Surprise',effect:'double_sub',   desc:'2 sous-marins PLA activés simultanément.', escalade:0 },
+    { id:'ev_p3', title:'Drone Essaim WZ-8',   effect:'swarm_attack', desc:'Jet D6 par navire US portée 4. ≥4=1hit.', escalade:1 },
+    { id:'ev_p4', title:'Frappe ASAT',         effect:'no_isr_us',    desc:'–1RNG missiles US. Pas ISR US. 2 tours.', escalade:2 },
+    { id:'ev_p5', title:'J-20 Fantômes',       effect:'air_buff_pla', desc:'+1 ATK tous aériens PLA ce tour.', escalade:0 },
+    { id:'ev_p6', title:'Cyberattaque PLA',    effect:'cyber_pla',    desc:'US ne peut recharger ressources ce tour.', escalade:1 },
+    { id:'ev_p7', title:'Blocus Éclair',       effect:'zem_pla',      desc:'ZEM temporaire 5hex. Attaque auto ce tour.', escalade:1 },
+    { id:'ev_p8', title:'Propagande CCTV',     effect:'moral_down',   desc:'Philippines –1ATK 2 tours. Escalade –1.', escalade:-1 },
+    { id:'ev_p9', title:'Renfort TYPE 054B',   effect:'pla_reinforce',desc:'PLA reçoit 1 frégate TYPE 054B.', escalade:0 },
+    { id:'ev_p10',title:'Exercice Conjoint',   effect:'us_reserve',   desc:'2 unités US réservées (surveillance) ce tour.', escalade:0 },
+  ],
+  us: [
+    { id:'ev_u1', title:'FONOPS Renforcées',   effect:'us_extra_act', desc:'+1 activation navale/tour · 3 tours.', escalade:0 },
+    { id:'ev_u2', title:'AUKUS SSN Transfer',  effect:'aus_sub',      desc:'Reçoit Collins SSN (ATK7 DEF7 MOV6).', escalade:0 },
+    { id:'ev_u3', title:'Signal NSA',          effect:'reveal_pla',   desc:'Voir tous les ordres PLA du prochain tour.', escalade:0 },
+    { id:'ev_u4', title:'B-52 Strike Package', effect:'b52_strike',   desc:'Frappe portée 8hex. Ignore SAM coordo.', escalade:2 },
+    { id:'ev_u5', title:'Philippines Activées',effect:'phil_active',  desc:'2 frégates + 1 F-16 rejoignent US.', escalade:0 },
+    { id:'ev_u6', title:'Ravitaillement Urgence',effect:'us_resupply',desc:'+4 ressources au choix pour US.', escalade:0 },
+    { id:'ev_u7', title:'Frappes TLAM Massives',effect:'tlam_mass',   desc:'6 TLAM sur 3 cibles max (portée 5).', escalade:2 },
+    { id:'ev_u8', title:'Suppression SEAD',    effect:'sead_total',   desc:'Tous SAM PLA 4hex supprimés · 2 tours.', escalade:0 },
+    { id:'ev_u9', title:'Japan MSDF Join',     effect:'japan_join',   desc:'2 destroyers Kongo (ATK7 DEF6 Aegis).', escalade:1 },
+    { id:'ev_u10',title:'MQ-9B Nuit Noire',   effect:'isr_strike',   desc:'5hex ISR révélés + 1 frappe Hellfire gratuite.', escalade:0 },
+  ]
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// FIREBASE OPERATIONS
+// ══════════════════════════════════════════════════════════════════════
+function initFirebase() {
+  try {
+    app = initializeApp(FIREBASE_CONFIG);
+    db = getDatabase(app);
+    return true;
+  } catch(e) {
+    console.warn('Firebase not configured, using local mode only');
+    return false;
+  }
+}
+
+async function createRoom(faction) {
+  const code = Math.random().toString(36).substr(2,6).toUpperCase();
+  myRoomCode = code;
+  myFaction = faction;
+  isOnlineMode = true;
+  gameRef = ref(db, `games/${code}`);
+  const state = createInitialState();
+  state.players = { [faction]: true };
+  state.timestamp = Date.now();
+  await set(gameRef, state);
+  subscribeToGame();
+  return code;
+}
+
+async function joinRoom(code, faction) {
+  myRoomCode = code;
+  myFaction = faction;
+  isOnlineMode = true;
+  gameRef = ref(db, `games/${code}`);
+  const snap = await get(gameRef);
+  if (!snap.exists()) throw new Error('Room not found');
+  const state = snap.val();
+  if (state.players && state.players[faction]) throw new Error('Faction already taken');
+  await update(gameRef, { [`players/${faction}`]: true });
+  subscribeToGame();
+  return state;
+}
+
+function subscribeToGame() {
+  if (!gameRef) return;
+  const unsub = onValue(gameRef, snap => {
+    if (!snap.exists()) return;
+    const state = snap.val();
+    G = state;
+    renderAll();
+  });
+  unsubscribers.push(unsub);
+}
+
+async function pushState(updates) {
+  if (isOnlineMode && gameRef) {
+    await update(gameRef, updates);
+  } else {
+    // local mode
+    Object.assign(G, updates);
+    renderAll();
+  }
+}
+
+async function pushFullState(state) {
+  if (isOnlineMode && gameRef) {
+    await set(gameRef, state);
+  } else {
+    G = state;
+    renderAll();
+  }
+}
+
+async function sendChat(msg) {
+  const entry = { faction: myFaction||'spectator', msg, time: Date.now() };
+  if (isOnlineMode && gameRef) {
+    const chatRef = ref(db, `games/${myRoomCode}/chat`);
+    await push(chatRef, entry);
+  } else {
+    if (!G.chat) G.chat = [];
+    G.chat.push(entry);
+    renderChat();
+  }
+}
+
+async function addLog(entry) {
+  const logEntry = { ...entry, time: Date.now() };
+  if (isOnlineMode && gameRef) {
+    const logRef = ref(db, `games/${myRoomCode}/log`);
+    await push(logRef, logEntry);
+  } else {
+    if (!G.log) G.log = [];
+    G.log.push(logEntry);
+    renderLog();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// GAME LOGIC
+// ══════════════════════════════════════════════════════════════════════
+let G = null; // current game state
+
+function canAct() {
+  if (!G) return false;
+  if (localMode) return true;
+  if (!isOnlineMode) return true;
+  return myFaction === G.currentPlayer || G.phase === 3; // planning is simultaneous
+}
+
+function canActFaction(faction) {
+  if (localMode) return true;
+  if (!isOnlineMode) return true;
+  return myFaction === faction;
+}
+
+// DICE
+function rollD6() { return Math.floor(Math.random()*6)+1; }
+function roll2D6() { return rollD6()+rollD6(); }
+
+function resolveCombat(attacker, defender, terrainBonus=0) {
+  const atkRoll = roll2D6();
+  const defRoll = roll2D6();
+  const atkTotal = atkRoll + attacker.atk + (attacker.suppressed ? -1 : 0);
+  const defTotal = defRoll + defender.def + terrainBonus + (defender.suppressed ? -2 : 0);
+  const diff = atkTotal - defTotal;
+  let damage = 0, result = '';
+  const isCrit = (atkRoll === 12);
+  const isDefFail = (defRoll === 2);
+
+  if (isDefFail) {
+    damage = diff >= 0 ? Math.max(1, Math.ceil(diff/3)) : 1;
+    result = 'DÉFAILLANCE DÉFENSE';
+  } else if (diff <= 0) {
+    result = 'REPOUSSÉ'; damage = 0;
+  } else if (diff <= 2) {
+    damage = 0; result = 'SUPPRESSION';
+  } else if (diff <= 4) {
+    damage = 1; result = '1 HIT';
+  } else if (diff <= 7) {
+    damage = 2; result = '2 HITS';
+  } else {
+    damage = defender.pv; result = 'DESTRUCTION';
+  }
+  if (isCrit) { damage = Math.min(damage*2, defender.pv); result += ' + CRITIQUE!'; }
+  return { atkRoll, defRoll, atkTotal, defTotal, diff, damage, result, isCrit, isDefFail };
+}
+
+async function executeAttack(attackerId, defenderId) {
+  if (!G || animating) return;
+  const attacker = G.units[attackerId];
+  const defender = G.units[defenderId];
+  if (!attacker || !defender) return;
+
+  // range check
+  const dist = latLngDistance(attacker.lat, attacker.lng, defender.lat, defender.lng);
+  const hexDist = Math.round(dist / 30); // ~30km per hex (spratleys scale)
+  if (hexDist > attacker.rng) {
+    showToast(`Hors de portée! (${hexDist} hex, portée max: ${attacker.rng})`, 'error');
+    return;
+  }
+
+  animating = true;
+  const combat = resolveCombat(attacker, defender);
+  showDiceAnimation(combat, attacker, defender, async () => {
+    // Apply damage
+    const newPv = Math.max(0, defender.pv - combat.damage);
+    const newSuppressed = combat.result.includes('SUPPRESSION');
+    const updates = {};
+    updates[`units/${defenderId}/pv`] = newPv;
+    updates[`units/${defenderId}/suppressed`] = newSuppressed;
+    if (newPv === 0) {
+      updates[`units/${defenderId}/destroyed`] = true;
+      // escalade
+      if (defender.type === 'carrier') {
+        updates['escalade'] = (G.escalade||3) + 2;
+        addLog({ type:'escalade', msg:`${defender.name} coulé! Escalade +2` });
+      }
+    }
+    await pushState(updates);
+    await addLog({
+      type: 'combat',
+      attacker: attacker.name,
+      defender: defender.name,
+      result: combat.result,
+      atkRoll: combat.atkRoll,
+      defRoll: combat.defRoll,
+      damage: combat.damage,
+      faction: attacker.faction
+    });
+    checkVictory();
+    animating = false;
+    selectedUnit = null;
+    renderAll();
+  });
+}
+
+async function moveUnit(unitId, newLat, newLng) {
+  if (!G || animating) return;
+  const unit = G.units[unitId];
+  if (!unit || unit.destroyed) return;
+  if (!canActFaction(unit.faction)) {
+    showToast("Ce n'est pas votre tour!", 'error'); return;
+  }
+  const dist = latLngDistance(unit.lat, unit.lng, newLat, newLng);
+  const hexMov = Math.round(dist / 30);
+  if (hexMov > unit.mov) {
+    showToast(`Mouvement trop long (${hexMov} hex, max ${unit.mov})`, 'error'); return;
+  }
+  animating = true;
+  await pushState({
+    [`units/${unitId}/lat`]: newLat,
+    [`units/${unitId}/lng`]: newLng,
+    [`units/${unitId}/movedThisTurn`]: true
+  });
+  await addLog({ type:'move', unit: unit.name, faction: unit.faction, toLat: newLat, toLng: newLng });
+  animating = false;
+  renderAll();
+}
+
+async function rollInitiative() {
+  if (!G) return;
+  const myRoll = rollD6();
+  const updates = {};
+  updates[`initiativeRolls/${myFaction||'pla'}`] = myRoll;
+  const otherFaction = (myFaction||'pla') === 'pla' ? 'us' : 'pla';
+  if (G.initiativeRolls && G.initiativeRolls[otherFaction]) {
+    const otherRoll = G.initiativeRolls[otherFaction];
+    const winner = myRoll > otherRoll ? (myFaction||'pla') :
+                   myRoll < otherRoll ? otherFaction :
+                   (Math.random()<0.5 ? (myFaction||'pla') : otherFaction);
+    updates['initiative'] = winner;
+    updates['currentPlayer'] = winner;
+    await addLog({ type:'initiative', msg:`Initiative: PLA(${updates[`initiativeRolls/pla`]||G.initiativeRolls?.pla||'?'}) vs US(${updates[`initiativeRolls/us`]||G.initiativeRolls?.us||'?'}) → ${winner.toUpperCase()} commence` });
+  }
+  await pushState(updates);
+}
+
+async function advancePhase() {
+  if (!G) return;
+  let newPhase = (G.phase % 8) + 1;
+  let newTurn = G.turn;
+  let updates = { phase: newPhase };
+  if (newPhase === 1) {
+    newTurn = G.turn + 1;
+    updates.turn = newTurn;
+    updates['readyPlayers/pla'] = false;
+    updates['readyPlayers/us'] = false;
+    updates['initiativeRolls/pla'] = null;
+    updates['initiativeRolls/us'] = null;
+    // Reset moved/attacked flags
+    const unitUpdates = {};
+    Object.values(G.units||{}).forEach(u => {
+      if (!u.destroyed) {
+        unitUpdates[`units/${u.id}/movedThisTurn`] = false;
+        unitUpdates[`units/${u.id}/attackedThisTurn`] = false;
+        unitUpdates[`units/${u.id}/suppressed`] = false;
+      }
+    });
+    Object.assign(updates, unitUpdates);
+    if (newTurn > (G.maxTurns||10)) {
+      updates.gameOver = true;
+      updates.winner = G.vpScore > 17 ? 'pla' : G.vpScore < 13 ? 'us' : 'draw';
+    }
+    await addLog({ type:'turn', msg:`═══ TOUR ${newTurn} COMMENCE ═══` });
+  }
+  await pushState(updates);
+}
+
+async function playerReady() {
+  if (!G) return;
+  const faction = myFaction || (G.currentPlayer);
+  await pushState({ [`readyPlayers/${faction}`]: true });
+  if (G.readyPlayers) {
+    const other = faction === 'pla' ? 'us' : 'pla';
+    if (G.readyPlayers[other]) {
+      await advancePhase();
+    }
+  }
+}
+
+async function drawEventCard(deck) {
+  if (!G) return;
+  const cards = [...(EVENT_DECK[deck]||[])];
+  const drawn = G.drawnEvents || [];
+  const available = cards.filter(c => !drawn.includes(c.id));
+  if (!available.length) { showToast('Deck vide!', 'warning'); return null; }
+  const card = available[Math.floor(Math.random()*available.length)];
+  const updates = {
+    drawnEvents: [...drawn, card.id],
+    escalade: Math.max(0, Math.min(10, (G.escalade||3) + (card.escalade||0)))
+  };
+  if (updates.escalade >= 10) {
+    updates.gameOver = true;
+    updates.winner = 'draw_nuclear';
+  }
+  await pushState(updates);
+  await addLog({ type:'event', card: card.title, deck, effect: card.desc, escalade: card.escalade });
+  return card;
+}
+
+function checkVictory() {
+  if (!G) return;
+  const units = G.units||{};
+  // Check if carrier destroyed
+  const fordDestroyed = units['us1']?.destroyed;
+  const fujianDestroyed = units['pla1']?.destroyed;
+  if (fordDestroyed && fujianDestroyed) return; // mutual destruction
+  // Escalade
+  if ((G.escalade||0) >= 10) {
+    pushState({ gameOver: true, winner: 'draw_nuclear' });
+  }
+}
+
+function latLngDistance(lat1, lng1, lat2, lng2) {
+  // Simplified hex distance based on degrees (1 deg ≈ 111km)
+  const dlat = lat2 - lat1, dlng = lng2 - lng1;
+  return Math.sqrt(dlat*dlat + dlng*dlng) * 111;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// UI RENDERING
+// ══════════════════════════════════════════════════════════════════════
+function renderAll() {
+  if (!G) return;
+  renderHUD();
+  renderUnitsOnMap();
+  renderLog();
+  renderChat();
+  renderPhasePanel();
+  renderResourcePanel();
+  renderEscalade();
+  if (G.gameOver) showGameOver();
+}
+
+function renderHUD() {
+  const el = document.getElementById('hud-turn');
+  if (el) el.textContent = `TOUR ${G.turn||1}/${G.maxTurns||10}`;
+  const ph = document.getElementById('hud-phase');
+  const phaseNames = {1:'INITIATIVE',2:'RENSEIGNEMENT',3:'PLANIFICATION',4:'MOUVEMENT',5:'COMBAT',6:'ÉVÉNEMENTS',7:'RAVITAILLEMENT',8:'SCORE'};
+  if (ph) ph.textContent = `PHASE ${G.phase||1}: ${phaseNames[G.phase||1]}`;
+  const vp = document.getElementById('hud-vp');
+  if (vp) {
+    const score = G.vpScore || 15;
+    let label = score > 17 ? '🔴 PLA AVANCE' : score < 13 ? '🔵 US AVANCE' : '⚪ ÉQUILIBRE';
+    vp.textContent = `PV: ${score} — ${label}`;
+  }
+  const initEl = document.getElementById('hud-initiative');
+  if (initEl) initEl.textContent = G.initiative ? `Initiative: ${G.initiative.toUpperCase()}` : 'Initiative: —';
+}
+
+function renderEscalade() {
+  const bar = document.getElementById('escalade-bar');
+  if (!bar) return;
+  const esc = G.escalade || 3;
+  bar.innerHTML = '';
+  for (let i=1; i<=10; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'esc-cell' + (i <= esc ? ' active' : '');
+    cell.style.background = i <= esc
+      ? `hsl(${Math.max(0,120-i*12)}, 80%, ${30+i*2}%)`
+      : 'rgba(255,255,255,0.05)';
+    cell.textContent = i === 10 ? '☢' : i;
+    bar.appendChild(cell);
+  }
+}
+
+function renderPhasePanel() {
+  const panel = document.getElementById('phase-panel');
+  if (!panel || !G) return;
+  const phase = G.phase || 1;
+  const phaseInfo = {
+    1: { icon:'🎲', title:'INITIATIVE', desc:'Lancez le dé pour déterminer qui joue en premier ce tour.', action:'Lancer le dé', fn:'rollInitiative()' },
+    2: { icon:'🔭', title:'RENSEIGNEMENT', desc:'Les unités ISR révèlent les positions ennemies. Drones et P-8A en action.', action:'Passer ISR', fn:'playerReady()' },
+    3: { icon:'📋', title:'PLANIFICATION', desc:'Donnez vos ordres secrets. Les deux joueurs jouent simultanément.', action:'Confirmer ordres', fn:'playerReady()' },
+    4: { icon:'🚀', title:'MOUVEMENT', desc:'Cliquez une unité puis une position sur la carte pour la déplacer.', action:'Fin mouvement', fn:'playerReady()' },
+    5: { icon:'⚔️', title:'COMBAT', desc:'Sélectionnez une unité, puis une cible ennemie à portée pour attaquer.', action:'Fin combat', fn:'playerReady()' },
+    6: { icon:'🃏', title:'ÉVÉNEMENTS', desc:'Piochez vos cartes événement. Les effets s\'appliquent immédiatement.', action:'Passer événements', fn:'playerReady()' },
+    7: { icon:'📦', title:'RAVITAILLEMENT', desc:'Vérification des lignes logistiques. Unités isolées pénalisées.', action:'Confirmer ravito', fn:'playerReady()' },
+    8: { icon:'🏆', title:'SCORE', desc:'Calcul des points de victoire pour les objectifs contrôlés.', action:'Fin du tour', fn:'advancePhase()' },
+  };
+  const info = phaseInfo[phase];
+  const ready = G.readyPlayers || {};
+  const myFac = myFaction || 'pla';
+  const otherFac = myFac === 'pla' ? 'us' : 'pla';
+
+  panel.innerHTML = `
+    <div class="phase-icon">${info.icon}</div>
+    <div class="phase-title">${info.title}</div>
+    <div class="phase-desc">${info.desc}</div>
+    <div class="ready-status">
+      <span class="ready-dot ${ready.pla?'ready':'waiting'}">PLA</span>
+      <span class="ready-dot ${ready.us?'ready':'waiting'}">US</span>
+    </div>
+    ${phase===6 ? `
+      <div class="event-buttons">
+        <button class="btn-ev btn-ev-neutral" onclick="handleDrawEvent('neutral')">Neutre</button>
+        <button class="btn-ev btn-ev-faction" onclick="handleDrawEvent('${myFac}')">${myFac.toUpperCase()}</button>
+      </div>` : ''}
+    ${phase===1 ? `
+      <div class="initiative-display">
+        <span class="init-roll ${G.initiativeRolls?.pla ? 'rolled' : ''}">PLA: ${G.initiativeRolls?.pla||'?'}</span>
+        <span class="init-roll ${G.initiativeRolls?.us ? 'rolled' : ''}">US: ${G.initiativeRolls?.us||'?'}</span>
+      </div>` : ''}
+    <button class="btn-phase-action ${ready[myFac]?'btn-waiting':''}" onclick="${info.fn}" ${ready[myFac]?'disabled':''}>
+      ${ready[myFac] ? '⏳ EN ATTENTE...' : info.action}
+    </button>`;
+}
+
+function renderResourcePanel() {
+  const panel = document.getElementById('resource-panel');
+  if (!panel || !G) return;
+  const res = G.resources || {};
+  panel.innerHTML = `
+    <div class="res-faction pla">
+      <div class="res-title">🔴 PLA</div>
+      <div class="res-item">AShM <span>${res.pla?.ashm??14}</span></div>
+      <div class="res-item">Carb. <span>${res.pla?.fuel??10}</span></div>
+      <div class="res-item">Amphi <span>${res.pla?.amphi??4}</span></div>
+    </div>
+    <div class="res-faction us">
+      <div class="res-title">🔵 US</div>
+      <div class="res-item">LRASM <span>${res.us?.lrasm??12}</span></div>
+      <div class="res-item">Carb. <span>${res.us?.fuel??12}</span></div>
+      <div class="res-item">TLAM  <span>${res.us?.tlam??8}</span></div>
+    </div>`;
+}
+
+function renderLog() {
+  const logEl = document.getElementById('game-log');
+  if (!logEl || !G) return;
+  const logs = G.log ? Object.values(G.log) : [];
+  const recent = logs.slice(-20).reverse();
+  logEl.innerHTML = recent.map(l => {
+    const icons = { combat:'⚔️', move:'🚀', turn:'═', initiative:'🎲', event:'🃏', escalade:'☢️' };
+    const col = l.faction==='pla'?'#ff8888':l.faction==='us'?'#88aaff':'#d4a820';
+    return `<div class="log-entry" style="border-left-color:${col}">
+      <span class="log-icon">${icons[l.type]||'•'}</span>
+      <span class="log-text">${formatLogEntry(l)}</span>
+    </div>`;
+  }).join('');
+}
+
+function formatLogEntry(l) {
+  if (l.type==='combat') return `${l.attacker} → ${l.defender}: <b>${l.result}</b> (${l.atkRoll} vs ${l.defRoll}${l.damage?', –'+l.damage+'PV':''})`;
+  if (l.type==='move') return `${l.unit} se déplace`;
+  if (l.type==='turn') return `<b>${l.msg}</b>`;
+  if (l.type==='initiative') return l.msg;
+  if (l.type==='event') return `Carte: <b>${l.card}</b> — ${l.effect}`;
+  if (l.type==='escalade') return `☢️ ${l.msg}`;
+  return l.msg || JSON.stringify(l);
+}
+
+function renderChat() {
+  const chatEl = document.getElementById('chat-messages');
+  if (!chatEl || !G) return;
+  const msgs = G.chat ? Object.values(G.chat) : [];
+  chatEl.innerHTML = msgs.slice(-30).map(m => {
+    const col = m.faction==='pla'?'#ff8888':m.faction==='us'?'#88aaff':'#d4a820';
+    const time = new Date(m.time||Date.now()).toLocaleTimeString('fr',{hour:'2-digit',minute:'2-digit'});
+    return `<div class="chat-msg">
+      <span class="chat-faction" style="color:${col}">[${m.faction.toUpperCase()}]</span>
+      <span class="chat-time">${time}</span>
+      <span class="chat-text">${escapeHtml(m.msg)}</span>
+    </div>`;
+  }).join('');
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// MAP & UNIT MARKERS
+// ══════════════════════════════════════════════════════════════════════
+function initMap() {
+  mapInstance = L.map('game-map', {
+    center: [12, 115], zoom: 5,
+    zoomControl: true, attributionControl: false
+  });
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 18, attribution: '© Esri'
+  }).addTo(mapInstance);
+
+  // Hex grid overlay
+  hexLayer = L.layerGroup().addTo(mapInstance);
+  drawHexGrid();
+
+  // Objectives
+  drawObjectives();
+
+  // 9-dash line
+  const nineDash = [[21.5,120],[20,121],[18,121],[16,120],[14,118],[12,115],[10,112],[8,110],[7,108],[9,106],[11,107],[13,109],[15,112],[17,114],[19,116],[21,118],[21.5,120]];
+  L.polygon(nineDash, {color:'#cc2222',weight:2,dashArray:'8,4',fillOpacity:0.05}).addTo(mapInstance);
+
+  // Click on map → move selected unit
+  mapInstance.on('click', e => {
+    if (selectedUnit && G?.phase === 4) {
+      const unit = G.units[selectedUnit];
+      if (unit && canActFaction(unit.faction) && !unit.movedThisTurn) {
+        moveUnit(selectedUnit, e.latlng.lat, e.latlng.lng);
+        selectedUnit = null;
+        document.querySelectorAll('.unit-marker.selected').forEach(el => el.classList.remove('selected'));
+      }
+    }
+  });
+}
+
+function drawHexGrid() {
+  if (!hexLayer || !mapInstance) return;
+  hexLayer.clearLayers();
+  const zoom = mapInstance.getZoom();
+  if (zoom < 6) return; // hide hex grid at world zoom
+
+  const bounds = mapInstance.getBounds();
+  const hexSizeDeg = zoom >= 8 ? 0.15 : zoom >= 7 ? 0.3 : 0.6;
+
+  for (let lat = Math.floor(bounds.getSouth()/hexSizeDeg)*hexSizeDeg; lat < bounds.getNorth(); lat+=hexSizeDeg*1.5) {
+    for (let lng = Math.floor(bounds.getWest()/hexSizeDeg)*hexSizeDeg; lng < bounds.getEast(); lng+=hexSizeDeg*1.732) {
+      const offset = (Math.round(lat/hexSizeDeg/1.5) % 2) * hexSizeDeg * 0.866;
+      const cx = lng + offset, cy = lat;
+      const hex = hexPolygon(cy, cx, hexSizeDeg);
+      L.polygon(hex, {
+        color:'rgba(212,168,32,0.25)', weight:0.8,
+        fillOpacity:0, className:'hex-cell'
+      }).addTo(hexLayer);
+    }
+  }
+}
+
+function hexPolygon(lat, lng, size) {
+  const pts = [];
+  for (let i=0;i<6;i++) {
+    const angle = Math.PI/180*(60*i-30);
+    pts.push([lat + size*Math.sin(angle), lng + size*Math.cos(angle)]);
+  }
+  return pts;
+}
+
+function drawObjectives() {
+  const objectives = createObjectives();
+  Object.values(objectives).forEach(obj => {
+    const icon = L.divIcon({
+      html: `<div class="obj-pin" data-id="${obj.id}">
+        <div class="obj-pin-vp">${obj.vp}</div>
+        <div class="obj-pin-name">${obj.name}</div>
+      </div>`,
+      iconSize:[60,40], iconAnchor:[30,20], className:''
+    });
+    L.marker([obj.lat, obj.lng], {icon}).addTo(mapInstance)
+      .on('click', () => showObjectiveInfo(obj));
+  });
+}
+
+function renderUnitsOnMap() {
+  if (!mapInstance || !G) return;
+  // Remove old markers
+  Object.values(unitMarkers).forEach(m => m.remove());
+  unitMarkers = {};
+
+  Object.values(G.units||{}).forEach(unit => {
+    if (unit.destroyed) return;
+    // Hide enemy submarines (hidden units)
+    const isHidden = unit.hidden && unit.faction !== (myFaction||'pla') && !localMode;
+    if (isHidden) return;
+
+    const isSelected = selectedUnit === unit.id;
+    const isEnemy = unit.faction !== (myFaction||'pla') && !localMode;
+    const pv = unit.pv || 0;
+    const maxPv = unit.maxPv || 1;
+    const pvPct = (pv/maxPv)*100;
+    const pvColor = pvPct > 60 ? '#00cc44' : pvPct > 30 ? '#ffaa00' : '#cc2222';
+
+    const factionColor = unit.faction === 'pla' ? '#cc2222' : '#1a4a8a';
+    const symSVG = getNATOSvg(unit.sym, factionColor);
+
+    const icon = L.divIcon({
+      html: `<div class="unit-marker ${isSelected?'selected':''} ${unit.suppressed?'suppressed':''} ${unit.movedThisTurn?'moved':''}" 
+               data-id="${unit.id}" data-faction="${unit.faction}"
+               onclick="selectUnit('${unit.id}')">
+        <div class="um-counter" style="border-color:${factionColor};background:${factionColor}22">
+          ${symSVG}
+        </div>
+        <div class="um-pv-bar">
+          <div class="um-pv-fill" style="width:${pvPct}%;background:${pvColor}"></div>
+        </div>
+        <div class="um-name">${unit.name}</div>
+        ${unit.suppressed ? '<div class="um-status">SUPP</div>' : ''}
+        ${unit.movedThisTurn ? '<div class="um-status moved-badge">MOV</div>' : ''}
+      </div>`,
+      iconSize:[52,62], iconAnchor:[26,31], className:''
+    });
+
+    const marker = L.marker([unit.lat, unit.lng], {icon, zIndexOffset: isSelected?1000:0})
+      .addTo(mapInstance)
+      .bindPopup(makeUnitPopup(unit), {maxWidth:280});
+
+    marker.on('click', (e) => {
+      L.DomEvent.stopPropagation(e);
+      selectUnit(unit.id);
+    });
+
+    unitMarkers[unit.id] = marker;
+  });
+}
+
+function makeUnitPopup(unit) {
+  const factionCol = unit.faction==='pla'?'#ff8888':'#88aaff';
+  const pvDots = '◆'.repeat(unit.pv||0)+'◇'.repeat((unit.maxPv||1)-(unit.pv||0));
+  const canAttack = G?.phase===5 && canActFaction(unit.faction) && !unit.attackedThisTurn;
+  const canMove = G?.phase===4 && canActFaction(unit.faction) && !unit.movedThisTurn;
+  return `<div class="unit-popup">
+    <div class="up-title" style="color:${factionCol}">${unit.name}</div>
+    <div class="up-type">${unit.type.toUpperCase()}</div>
+    <div class="up-stats">
+      <span>ATK <b style="color:#ff6666">${unit.atk}</b></span>
+      <span>DEF <b style="color:#6699ff">${unit.def}</b></span>
+      <span>MOV <b style="color:#d4a820">${unit.mov}</b></span>
+      <span>RNG <b>${unit.rng}</b></span>
+    </div>
+    <div class="up-pv">${pvDots} (${unit.pv||0}/${unit.maxPv||1} PV)</div>
+    <div class="up-special">${unit.special}</div>
+    <div class="up-actions">
+      ${canMove ? `<button class="up-btn up-btn-move" onclick="selectUnitForMove('${unit.id}')">🚀 Déplacer</button>` : ''}
+      ${canAttack ? `<button class="up-btn up-btn-atk" onclick="enterAttackMode('${unit.id}')">⚔️ Attaquer</button>` : ''}
+    </div>
+  </div>`;
+}
+
+function selectUnit(id) {
+  if (!G) return;
+  const unit = G.units[id];
+  if (!unit || unit.destroyed) return;
+  selectedUnit = selectedUnit === id ? null : id;
+  if (attackMode && selectedUnit) {
+    // if in attack mode, target selected unit
+    if (unit.faction !== attackerFaction) {
+      executeAttack(attackModeUnit, id);
+      exitAttackMode();
+    }
+  }
+  renderUnitsOnMap();
+  showUnitDetail(unit);
+}
+
+let attackMode = false, attackModeUnit = null, attackerFaction = null;
+function enterAttackMode(unitId) {
+  attackMode = true;
+  attackModeUnit = unitId;
+  const unit = G.units[unitId];
+  attackerFaction = unit?.faction;
+  selectedUnit = unitId;
+  showToast(`Mode attaque: cliquez une unité ennemie à portée (max ${unit?.rng} hex)`, 'info');
+  mapInstance.closePopup();
+  renderUnitsOnMap();
+}
+function exitAttackMode() {
+  attackMode = false;
+  attackModeUnit = null;
+  attackerFaction = null;
+}
+function selectUnitForMove(unitId) {
+  selectedUnit = unitId;
+  mapInstance.closePopup();
+  showToast('Cliquez sur la carte pour déplacer cette unité', 'info');
+  renderUnitsOnMap();
+}
+
+function showUnitDetail(unit) {
+  const panel = document.getElementById('unit-detail');
+  if (!panel) return;
+  const fac = unit.faction==='pla'?'#ff8888':'#88aaff';
+  const pvDots = '◆'.repeat(unit.pv||0)+'◇'.repeat((unit.maxPv||1)-(unit.pv||0));
+  panel.innerHTML = `
+    <div class="ud-faction" style="color:${fac}">${unit.faction.toUpperCase()} — ${unit.type.toUpperCase()}</div>
+    <div class="ud-name">${unit.name}</div>
+    <div class="ud-pv">${pvDots}</div>
+    <div class="ud-stats-grid">
+      <div class="ud-stat"><span>ATK</span><b style="color:#ff6666">${unit.atk}</b></div>
+      <div class="ud-stat"><span>DEF</span><b style="color:#6699ff">${unit.def}</b></div>
+      <div class="ud-stat"><span>MOV</span><b style="color:#d4a820">${unit.mov}</b></div>
+      <div class="ud-stat"><span>RNG</span><b>${unit.rng}</b></div>
+    </div>
+    <div class="ud-special">${unit.special}</div>
+    <div class="ud-status">
+      ${unit.suppressed?'<span class="ud-badge suppressed">SUPPRIMÉ</span>':''}
+      ${unit.isolated?'<span class="ud-badge isolated">ISOLÉ</span>':''}
+      ${unit.movedThisTurn?'<span class="ud-badge moved">DÉPLACÉ</span>':''}
+      ${unit.attackedThisTurn?'<span class="ud-badge attacked">ATTAQUÉ</span>':''}
+      ${unit.hidden?'<span class="ud-badge hidden">CACHÉ</span>':''}
+    </div>
+    <div class="ud-actions">
+      ${G?.phase===4 && canActFaction(unit.faction) && !unit.movedThisTurn ?
+        `<button class="ud-btn ud-btn-move" onclick="selectUnitForMove('${unit.id}')">🚀 Déplacer</button>` : ''}
+      ${G?.phase===5 && canActFaction(unit.faction) && !unit.attackedThisTurn ?
+        `<button class="ud-btn ud-btn-atk" onclick="enterAttackMode('${unit.id}')">⚔️ Attaquer</button>` : ''}
+    </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// DICE ANIMATION
+// ══════════════════════════════════════════════════════════════════════
+function showDiceAnimation(combat, attacker, defender, callback) {
+  const modal = document.getElementById('dice-modal');
+  if (!modal) { callback(); return; }
+  modal.style.display = 'flex';
+
+  let frame = 0;
+  const animate = setInterval(() => {
+    const fakeA1 = rollD6(), fakeA2 = rollD6();
+    const fakeD1 = rollD6(), fakeD2 = rollD6();
+    const aEl = document.getElementById('dice-atk');
+    const dEl = document.getElementById('dice-def');
+    if (aEl) aEl.textContent = `${fakeA1} + ${fakeA2}`;
+    if (dEl) dEl.textContent = `${fakeD1} + ${fakeD2}`;
+    frame++;
+    if (frame >= 8) {
+      clearInterval(animate);
+      if (aEl) aEl.textContent = `${combat.atkRoll}`;
+      if (dEl) dEl.textContent = `${combat.defRoll}`;
+      const resEl = document.getElementById('dice-result');
+      if (resEl) {
+        resEl.textContent = combat.result;
+        resEl.className = 'dice-result ' + (combat.damage > 0 ? 'hit' : 'miss');
+      }
+      const dmgEl = document.getElementById('dice-damage');
+      if (dmgEl) dmgEl.textContent = combat.damage > 0 ? `–${combat.damage} PV` : 'Aucun dégât';
+      const detailEl = document.getElementById('dice-detail');
+      if (detailEl) detailEl.textContent = `${attacker.name} ATK(${attacker.atk})+${combat.atkRoll}=${combat.atkTotal} vs ${defender.name} DEF(${defender.def})+${combat.defRoll}=${combat.defTotal}`;
+      setTimeout(() => {
+        modal.style.display = 'none';
+        callback();
+      }, 1800);
+    }
+  }, 80);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ══════════════════════════════════════════════════════════════════════
+function showToast(msg, type='info') {
+  const toast = document.getElementById('toast');
+  if (!toast) return;
+  toast.textContent = msg;
+  toast.className = `toast toast-${type} show`;
+  clearTimeout(toast._timeout);
+  toast._timeout = setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+function showObjectiveInfo(obj) {
+  showToast(`${obj.name} — ${obj.vp} VP | Contrôlé: ${obj.controller?.toUpperCase()||'NEUTRE'}`, 'info');
+}
+
+function showGameOver() {
+  const overlay = document.getElementById('gameover-overlay');
+  if (!overlay || !G) return;
+  const w = G.winner;
+  overlay.style.display = 'flex';
+  const title = document.getElementById('go-title');
+  const subtitle = document.getElementById('go-subtitle');
+  if (w === 'draw_nuclear') {
+    if (title) title.textContent = '☢️ DÉFAITE PARTAGÉE';
+    if (subtitle) subtitle.textContent = 'Escalade nucléaire — Le monde perd';
+  } else if (w === 'pla') {
+    if (title) title.textContent = '🔴 VICTOIRE PLA';
+    if (subtitle) subtitle.textContent = 'La Chine contrôle la mer de Chine méridionale';
+  } else if (w === 'us') {
+    if (title) title.textContent = '🔵 VICTOIRE INDOPACOM';
+    if (subtitle) subtitle.textContent = 'Liberté de navigation rétablie';
+  } else {
+    if (title) title.textContent = '⚪ MATCH NUL';
+    if (subtitle) subtitle.textContent = 'Cessez-le-feu diplomatique';
+  }
+}
+
+async function handleDrawEvent(deck) {
+  const card = await drawEventCard(deck);
+  if (card) showEventModal(card);
+}
+
+function showEventModal(card) {
+  const modal = document.getElementById('event-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const title = document.getElementById('em-title');
+  const desc = document.getElementById('em-desc');
+  const esc = document.getElementById('em-escalade');
+  if (title) title.textContent = card.title;
+  if (desc) desc.textContent = card.desc;
+  if (esc) {
+    esc.textContent = card.escalade > 0 ? `Escalade +${card.escalade}` : card.escalade < 0 ? `Escalade ${card.escalade}` : '';
+    esc.style.color = card.escalade > 0 ? '#ff4444' : '#44ff44';
+  }
+}
+
+function getNATOSvg(type, color) {
+  const s = {
+    carrier: `<svg viewBox="0 0 40 40"><rect x="3" y="10" width="34" height="22" rx="2" fill="none" stroke="${color}" stroke-width="2.5"/><line x1="3" y1="10" x2="37" y2="32" stroke="${color}" stroke-width="1.5"/><line x1="37" y1="10" x2="3" y2="32" stroke="${color}" stroke-width="1.5"/><rect x="12" y="3" width="16" height="7" fill="${color}" rx="1"/></svg>`,
+    destroyer:`<svg viewBox="0 0 40 40"><rect x="3" y="12" width="34" height="18" rx="2" fill="none" stroke="${color}" stroke-width="2.5"/><line x1="3" y1="12" x2="37" y2="30" stroke="${color}" stroke-width="1.5"/><line x1="37" y1="12" x2="3" y2="30" stroke="${color}" stroke-width="1.5"/></svg>`,
+    submarine:`<svg viewBox="0 0 40 40"><ellipse cx="20" cy="22" rx="16" ry="10" fill="none" stroke="${color}" stroke-width="2.5"/><line x1="20" y1="12" x2="20" y2="5" stroke="${color}" stroke-width="2"/><line x1="13" y1="17" x2="27" y2="17" stroke="${color}" stroke-width="2"/></svg>`,
+    amphibious:`<svg viewBox="0 0 40 40"><rect x="3" y="12" width="34" height="18" rx="2" fill="none" stroke="${color}" stroke-width="2.5"/><ellipse cx="20" cy="12" rx="10" ry="7" fill="none" stroke="${color}" stroke-width="2"/></svg>`,
+    fighter:`<svg viewBox="0 0 40 40"><polygon points="20,4 29,34 20,26 11,34" fill="none" stroke="${color}" stroke-width="2.5"/><line x1="8" y1="21" x2="32" y2="21" stroke="${color}" stroke-width="2"/></svg>`,
+    bomber:`<svg viewBox="0 0 40 40"><polygon points="20,4 32,34 20,26 8,34" fill="none" stroke="${color}" stroke-width="2.5"/><line x1="5" y1="26" x2="35" y2="26" stroke="${color}" stroke-width="2.5"/></svg>`,
+    ew:`<svg viewBox="0 0 40 40"><rect x="5" y="10" width="30" height="22" rx="2" fill="none" stroke="${color}" stroke-width="2.5"/><text x="20" y="25" text-anchor="middle" font-size="10" fill="${color}" font-family="monospace" font-weight="bold">EW</text></svg>`,
+    infantry:`<svg viewBox="0 0 40 40"><rect x="4" y="10" width="32" height="22" rx="2" fill="none" stroke="${color}" stroke-width="2.5"/><line x1="4" y1="10" x2="36" y2="32" stroke="${color}" stroke-width="1.5"/><line x1="36" y1="10" x2="4" y2="32" stroke="${color}" stroke-width="1.5"/></svg>`,
+    sam:`<svg viewBox="0 0 40 40"><rect x="4" y="14" width="32" height="16" rx="2" fill="none" stroke="${color}" stroke-width="2.5"/><polygon points="20,4 26,14 14,14" fill="${color}"/><polygon points="20,38 26,30 14,30" fill="${color}"/></svg>`,
+    drone:`<svg viewBox="0 0 40 40"><ellipse cx="20" cy="22" rx="13" ry="8" fill="none" stroke="${color}" stroke-width="2.5"/><line x1="7" y1="22" x2="1" y2="16" stroke="${color}" stroke-width="1.5"/><line x1="33" y1="22" x2="39" y2="16" stroke="${color}" stroke-width="1.5"/></svg>`,
+    maritime:`<svg viewBox="0 0 40 40"><rect x="3" y="12" width="34" height="18" rx="2" fill="none" stroke="${color}" stroke-width="2.5"/><line x1="3" y1="21" x2="37" y2="21" stroke="${color}" stroke-width="1.5"/><circle cx="20" cy="21" r="5" fill="${color}"/></svg>`,
+    arty:`<svg viewBox="0 0 40 40"><rect x="5" y="15" width="28" height="16" rx="2" fill="none" stroke="${color}" stroke-width="2.5"/><line x1="19" y1="15" x2="30" y2="6" stroke="${color}" stroke-width="2.5"/><circle cx="11" cy="34" r="5" fill="none" stroke="${color}" stroke-width="2"/><circle cx="28" cy="34" r="5" fill="none" stroke="${color}" stroke-width="2"/></svg>`,
+  };
+  return s[type] || s.infantry;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// LOBBY & SETUP
+// ══════════════════════════════════════════════════════════════════════
+window.startLocalGame = function() {
+  localMode = true;
+  isOnlineMode = false;
+  myFaction = null;
+  G = createInitialState();
+  G.players = { pla: true, us: true };
+  document.getElementById('lobby').style.display = 'none';
+  document.getElementById('game-container').style.display = 'flex';
+  initMap();
+  mapInstance.on('zoomend moveend', drawHexGrid);
+  renderAll();
+  addLog({ type:'turn', msg:'═══ PARTIE LOCALE DÉMARRÉE — TOUR 1 ═══' });
+  showToast('Partie locale démarrée — 2 joueurs sur le même écran', 'success');
+};
+
+window.startOnlineCreate = async function(faction) {
+  const fbOk = initFirebase();
+  if (!fbOk) { showToast('Firebase non configuré — voir les instructions', 'error'); return; }
+  myFaction = faction;
+  try {
+    const code = await createRoom(faction);
+    document.getElementById('room-code-display').textContent = code;
+    document.getElementById('lobby-waiting').style.display = 'block';
+    document.getElementById('lobby-create').style.display = 'none';
+    showToast(`Salle créée: ${code} — Attendez votre adversaire`, 'success');
+    // When opponent joins, game starts
+    const checkRef = ref(db, `games/${code}/players`);
+    onValue(checkRef, snap => {
+      const players = snap.val();
+      if (players && players.pla && players.us) {
+        document.getElementById('lobby').style.display = 'none';
+        document.getElementById('game-container').style.display = 'flex';
+        initMap();
+        mapInstance.on('zoomend moveend', drawHexGrid);
+        renderAll();
+      }
+    });
+  } catch(e) {
+    showToast('Erreur: ' + e.message, 'error');
+  }
+};
+
+window.startOnlineJoin = async function() {
+  const fbOk = initFirebase();
+  if (!fbOk) { showToast('Firebase non configuré', 'error'); return; }
+  const code = document.getElementById('join-code-input').value.toUpperCase().trim();
+  const faction = document.getElementById('join-faction-select').value;
+  if (!code || code.length !== 6) { showToast('Code invalide (6 caractères)', 'error'); return; }
+  myFaction = faction;
+  try {
+    await joinRoom(code, faction);
+    document.getElementById('lobby').style.display = 'none';
+    document.getElementById('game-container').style.display = 'flex';
+    initMap();
+    mapInstance.on('zoomend moveend', drawHexGrid);
+    renderAll();
+    showToast(`Rejoint la partie ${code} en tant que ${faction.toUpperCase()}`, 'success');
+  } catch(e) {
+    showToast('Erreur: ' + e.message, 'error');
+  }
+};
+
+window.rollInitiative = rollInitiative;
+window.playerReady = playerReady;
+window.advancePhase = advancePhase;
+window.selectUnit = selectUnit;
+window.enterAttackMode = enterAttackMode;
+window.selectUnitForMove = selectUnitForMove;
+window.handleDrawEvent = handleDrawEvent;
+window.sendChatMsg = async function() {
+  const input = document.getElementById('chat-input');
+  if (!input?.value?.trim()) return;
+  await sendChat(input.value.trim());
+  input.value = '';
+};
+window.closeDiceModal = function() { document.getElementById('dice-modal').style.display='none'; };
+window.closeEventModal = function() { document.getElementById('event-modal').style.display='none'; };
+window.restartGame = async function() {
+  G = createInitialState();
+  await pushFullState(G);
+  document.getElementById('gameover-overlay').style.display='none';
+  renderAll();
+};
+window.toggleMapLayer = function(type) {
+  if (!mapInstance) return;
+  mapInstance.eachLayer(l => { if (l._url) mapInstance.removeLayer(l); });
+  const url = type === 'satellite'
+    ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+    : 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+  L.tileLayer(url, {maxZoom:18}).addTo(mapInstance);
+};
+window.toggleHexGrid = function() {
+  if (!hexLayer) return;
+  if (mapInstance.hasLayer(hexLayer)) mapInstance.removeLayer(hexLayer);
+  else { mapInstance.addLayer(hexLayer); drawHexGrid(); }
+};
+
+// Init on load
+window.addEventListener('load', () => {
+  // Lobby is shown by default
+  document.getElementById('lobby').style.display = 'flex';
+  document.getElementById('game-container').style.display = 'none';
+});
+</script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Share+Tech+Mono&family=Oswald:wght@300;400;600;700&family=Rajdhani:wght@400;600;700&display=swap');
+
+:root {
+  --gold:#d4a820; --gold2:#f0c840;
+  --dark:#090e09; --dark2:#111a11; --dark3:#1a2a1a;
+  --tan:#c8b882; --tan2:#e8d8a0;
+  --red:#cc2222; --red2:#ff4444;
+  --blue:#1a4a8a; --blue2:#3a7acc;
+  --cream:#f5f0e0; --green:#2a8a2a;
+  --panel-bg:rgba(10,18,10,0.95);
+  --border:rgba(212,168,32,0.3);
+}
+*, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
+html,body { width:100%; height:100%; overflow:hidden; font-family:'Rajdhani',sans-serif; background:var(--dark); color:var(--cream); }
+
+/* ═══════════════════════════ LOBBY ═══════════════════════════ */
+#lobby {
+  position:fixed; inset:0; z-index:9000;
+  background:radial-gradient(ellipse at center, #0d2a0d 0%, #000 100%);
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:0;
+}
+.lobby-bg {
+  position:absolute; inset:0; overflow:hidden; pointer-events:none;
+}
+.lobby-bg::before {
+  content:''; position:absolute; inset:0;
+  background:repeating-linear-gradient(45deg, transparent, transparent 30px, rgba(212,168,32,0.02) 30px, rgba(212,168,32,0.02) 60px);
+}
+.lobby-title {
+  font-family:'Bebas Neue',sans-serif;
+  font-size:clamp(2.5rem,6vw,5rem);
+  letter-spacing:6px; color:var(--gold);
+  text-shadow:0 0 40px rgba(212,168,32,0.5),0 0 80px rgba(212,168,32,0.2);
+  text-align:center; position:relative; z-index:1;
+  animation: titlePulse 3s ease-in-out infinite;
+}
+@keyframes titlePulse { 0%,100%{text-shadow:0 0 40px rgba(212,168,32,0.5)} 50%{text-shadow:0 0 60px rgba(212,168,32,0.9),0 0 100px rgba(212,168,32,0.3)} }
+.lobby-subtitle {
+  font-family:'Share Tech Mono',monospace; font-size:.8rem;
+  color:var(--tan); letter-spacing:3px; text-align:center;
+  margin-bottom:40px; position:relative; z-index:1;
+}
+.lobby-cards {
+  display:flex; gap:20px; flex-wrap:wrap; justify-content:center;
+  position:relative; z-index:1;
+}
+.lobby-card {
+  background:rgba(15,25,15,0.9); border:1px solid var(--border);
+  border-top:3px solid var(--gold); padding:28px 32px;
+  width:260px; display:flex; flex-direction:column; gap:14px;
+  transition:transform 0.2s, box-shadow 0.2s;
+}
+.lobby-card:hover { transform:translateY(-4px); box-shadow:0 12px 40px rgba(0,0,0,0.6); }
+.lc-title { font-family:'Bebas Neue',sans-serif; font-size:1.4rem; letter-spacing:3px; color:var(--gold); }
+.lc-desc { font-size:.8rem; color:var(--tan); line-height:1.5; }
+.lc-btn {
+  background:var(--gold); color:#000; border:none; padding:10px;
+  font-family:'Oswald',sans-serif; font-size:.9rem; font-weight:700;
+  letter-spacing:2px; cursor:pointer; transition:all 0.15s;
+}
+.lc-btn:hover { background:var(--gold2); }
+.lc-btn.red { background:var(--red); color:white; }
+.lc-btn.red:hover { background:var(--red2); }
+.lc-btn.blue { background:var(--blue); color:white; }
+.lc-btn.blue:hover { background:var(--blue2); }
+.lc-input {
+  background:rgba(0,0,0,0.5); border:1px solid var(--border); color:var(--cream);
+  padding:8px; font-family:'Share Tech Mono',monospace; font-size:.9rem;
+  text-transform:uppercase; width:100%; letter-spacing:2px;
+}
+.lc-input:focus { outline:none; border-color:var(--gold); }
+.lc-select {
+  background:rgba(0,0,0,0.7); border:1px solid var(--border); color:var(--cream);
+  padding:8px; font-family:'Share Tech Mono',monospace; font-size:.85rem;
+  width:100%;
+}
+#room-code-display {
+  font-family:'Bebas Neue',sans-serif; font-size:2.5rem; color:var(--gold);
+  letter-spacing:6px; text-align:center;
+  text-shadow:0 0 20px rgba(212,168,32,0.6);
+}
+#lobby-waiting { display:none; flex-direction:column; gap:10px; align-items:center; }
+
+/* ═══════════════════════════ GAME CONTAINER ═══════════════════════════ */
+#game-container {
+  display:flex; flex-direction:column;
+  width:100vw; height:100vh; overflow:hidden;
+}
+
+/* TOP HUD */
+.game-hud {
+  background:linear-gradient(180deg,var(--dark) 0%,var(--dark2) 100%);
+  border-bottom:2px solid var(--gold);
+  padding:6px 16px; display:flex; align-items:center; gap:16px;
+  flex-shrink:0; position:relative; z-index:600;
+}
+.hud-title {
+  font-family:'Bebas Neue',sans-serif; font-size:1.4rem;
+  letter-spacing:4px; color:var(--gold);
+}
+.hud-divider { width:1px; height:24px; background:var(--border); }
+.hud-item {
+  font-family:'Share Tech Mono',monospace; font-size:.7rem;
+  color:var(--tan); display:flex; flex-direction:column; gap:2px;
+}
+.hud-item b { color:var(--cream); font-size:.85rem; }
+.hud-spacer { flex:1; }
+.hud-faction-badge {
+  padding:4px 12px; font-family:'Oswald',sans-serif; font-size:.75rem;
+  letter-spacing:2px; font-weight:700; border:1px solid;
+}
+.hud-faction-badge.pla { background:rgba(204,34,34,.2); border-color:var(--red); color:#ff8888; }
+.hud-faction-badge.us  { background:rgba(26,74,138,.2); border-color:var(--blue2); color:#88aaff; }
+.hud-faction-badge.local { background:rgba(212,168,32,.15); border-color:var(--gold); color:var(--gold); }
+
+/* MAIN LAYOUT */
+.game-body {
+  display:flex; flex:1; overflow:hidden;
+}
+
+/* LEFT PANEL */
+.panel-left {
+  width:220px; flex-shrink:0;
+  background:var(--panel-bg); border-right:1px solid var(--border);
+  display:flex; flex-direction:column; overflow:hidden;
+}
+.panel-section {
+  border-bottom:1px solid var(--border); padding:10px;
+}
+.panel-section-title {
+  font-family:'Bebas Neue',sans-serif; font-size:.9rem;
+  letter-spacing:2px; color:var(--gold); margin-bottom:8px;
+  display:flex; align-items:center; gap:6px;
+}
+
+/* Phase panel */
+.phase-icon { font-size:1.8rem; text-align:center; margin-bottom:4px; }
+.phase-title {
+  font-family:'Bebas Neue',sans-serif; font-size:1.1rem;
+  letter-spacing:2px; color:var(--gold); text-align:center;
+}
+.phase-desc { font-size:.72rem; color:var(--tan); text-align:center; line-height:1.4; margin:6px 0; }
+.ready-status { display:flex; gap:8px; justify-content:center; margin:6px 0; }
+.ready-dot {
+  padding:3px 10px; font-family:'Share Tech Mono',monospace; font-size:.65rem;
+  border:1px solid; border-radius:2px;
+}
+.ready-dot.ready { border-color:#44ff44; color:#44ff44; background:rgba(68,255,68,.1); }
+.ready-dot.waiting { border-color:var(--border); color:var(--tan); }
+.btn-phase-action {
+  width:100%; padding:9px; background:var(--gold); color:#000;
+  border:none; font-family:'Oswald',sans-serif; font-size:.85rem;
+  font-weight:700; letter-spacing:2px; cursor:pointer; transition:all .15s;
+  margin-top:6px;
+}
+.btn-phase-action:hover:not(:disabled) { background:var(--gold2); }
+.btn-phase-action.btn-waiting,
+.btn-phase-action:disabled { background:rgba(212,168,32,.2); color:var(--tan); cursor:not-allowed; }
+.initiative-display { display:flex; gap:8px; justify-content:center; font-family:'Share Tech Mono',monospace; font-size:.75rem; }
+.init-roll { padding:4px 8px; background:rgba(0,0,0,.4); border:1px solid var(--border); color:var(--tan); }
+.init-roll.rolled { border-color:var(--gold); color:var(--gold); }
+.event-buttons { display:flex; gap:6px; margin:6px 0; }
+.btn-ev { flex:1; padding:6px 4px; border:none; font-family:'Share Tech Mono',monospace; font-size:.65rem; cursor:pointer; }
+.btn-ev-neutral { background:rgba(212,168,32,.3); color:var(--gold); border:1px solid var(--gold); }
+.btn-ev-faction { background:rgba(100,100,200,.3); color:#aaaaff; border:1px solid #5555aa; }
+
+/* Resources */
+#resource-panel { font-size:.72rem; }
+.res-faction { margin-bottom:8px; }
+.res-title { font-family:'Bebas Neue',sans-serif; font-size:.85rem; letter-spacing:1px; margin-bottom:4px; }
+.res-faction.pla .res-title { color:#ff8888; }
+.res-faction.us .res-title { color:#88aaff; }
+.res-item { display:flex; justify-content:space-between; color:var(--tan); padding:1px 0; }
+.res-item span { color:var(--gold); font-weight:bold; }
+
+/* Escalade */
+#escalade-bar { display:flex; height:20px; gap:2px; margin-top:4px; }
+.esc-cell {
+  flex:1; display:flex; align-items:center; justify-content:center;
+  font-family:'Bebas Neue',sans-serif; font-size:.75rem; color:white;
+  transition:background .3s;
+}
+.esc-cell.active { font-weight:bold; }
+
+/* Unit Detail */
+#unit-detail { font-size:.75rem; min-height:120px; }
+.ud-faction { font-family:'Share Tech Mono',monospace; font-size:.65rem; letter-spacing:2px; margin-bottom:2px; }
+.ud-name { font-family:'Bebas Neue',sans-serif; font-size:1rem; letter-spacing:2px; color:var(--cream); margin-bottom:4px; }
+.ud-pv { font-size:.85rem; letter-spacing:1px; margin-bottom:6px; }
+.ud-stats-grid { display:grid; grid-template-columns:1fr 1fr; gap:4px; margin-bottom:6px; }
+.ud-stat { background:rgba(0,0,0,.4); padding:3px 6px; display:flex; justify-content:space-between; }
+.ud-stat span { font-size:.65rem; color:var(--tan); }
+.ud-stat b { font-size:.85rem; }
+.ud-special { font-size:.65rem; color:var(--tan); background:rgba(0,0,0,.3); padding:4px; border-left:2px solid var(--gold); line-height:1.4; margin-bottom:6px; }
+.ud-status { display:flex; flex-wrap:wrap; gap:3px; margin-bottom:6px; }
+.ud-badge { padding:2px 6px; font-size:.6rem; font-family:'Share Tech Mono',monospace; border:1px solid; }
+.ud-badge.suppressed { border-color:#ffaa00; color:#ffaa00; }
+.ud-badge.isolated { border-color:#ff6600; color:#ff6600; }
+.ud-badge.moved { border-color:#4488ff; color:#4488ff; }
+.ud-badge.attacked { border-color:#ff4444; color:#ff4444; }
+.ud-badge.hidden { border-color:#888; color:#888; }
+.ud-actions { display:flex; gap:6px; }
+.ud-btn { flex:1; padding:5px; border:none; font-family:'Share Tech Mono',monospace; font-size:.65rem; cursor:pointer; }
+.ud-btn-move { background:rgba(68,136,255,.3); color:#88aaff; border:1px solid #4488ff; }
+.ud-btn-atk  { background:rgba(204,34,34,.3); color:#ff8888; border:1px solid var(--red); }
+
+/* MAP CENTER */
+#game-map { flex:1; z-index:1; }
+
+/* RIGHT PANEL */
+.panel-right {
+  width:240px; flex-shrink:0;
+  background:var(--panel-bg); border-left:1px solid var(--border);
+  display:flex; flex-direction:column; overflow:hidden;
+}
+
+/* LOG */
+#game-log { flex:1; overflow-y:auto; padding:6px; font-size:.68rem; }
+#game-log::-webkit-scrollbar { width:3px; }
+#game-log::-webkit-scrollbar-thumb { background:var(--gold); }
+.log-entry {
+  display:flex; gap:5px; padding:3px 6px; margin-bottom:2px;
+  border-left:2px solid; background:rgba(0,0,0,.3);
+  line-height:1.4;
+}
+.log-icon { flex-shrink:0; }
+.log-text { color:var(--tan2); }
+.log-text b { color:var(--cream); }
+
+/* CHAT */
+.chat-area { display:flex; flex-direction:column; height:180px; flex-shrink:0; border-top:1px solid var(--border); }
+#chat-messages { flex:1; overflow-y:auto; padding:6px; font-size:.68rem; }
+#chat-messages::-webkit-scrollbar { width:3px; }
+#chat-messages::-webkit-scrollbar-thumb { background:var(--gold); }
+.chat-msg { margin-bottom:3px; line-height:1.4; }
+.chat-faction { font-weight:bold; font-family:'Share Tech Mono',monospace; font-size:.65rem; }
+.chat-time { color:var(--tan); font-size:.6rem; margin:0 4px; }
+.chat-text { color:var(--tan2); }
+.chat-input-row { display:flex; gap:0; border-top:1px solid var(--border); }
+#chat-input {
+  flex:1; background:rgba(0,0,0,.5); border:none; color:var(--cream);
+  padding:7px 8px; font-family:'Share Tech Mono',monospace; font-size:.72rem;
+}
+#chat-input:focus { outline:none; }
+.chat-send {
+  background:var(--gold); color:#000; border:none; padding:0 10px;
+  font-family:'Bebas Neue',sans-serif; font-size:.9rem; cursor:pointer;
+}
+.chat-send:hover { background:var(--gold2); }
+
+/* MAP CONTROLS BAR */
+.map-controls-bar {
+  position:absolute; top:8px; left:50%; transform:translateX(-50%);
+  z-index:500; display:flex; gap:6px; background:rgba(9,14,9,.85);
+  border:1px solid var(--border); padding:5px 8px;
+}
+.mcb-btn {
+  background:transparent; border:1px solid var(--border); color:var(--tan);
+  font-family:'Share Tech Mono',monospace; font-size:.65rem;
+  padding:4px 8px; cursor:pointer; transition:all .15s;
+}
+.mcb-btn:hover { background:rgba(212,168,32,.15); color:var(--gold); border-color:var(--gold); }
+
+/* UNIT MARKERS */
+.unit-marker {
+  cursor:pointer; text-align:center; position:relative;
+  filter:drop-shadow(0 2px 6px rgba(0,0,0,.8));
+  transition:filter .15s;
+}
+.unit-marker:hover { filter:drop-shadow(0 2px 12px rgba(255,255,255,.3)); }
+.unit-marker.selected .um-counter {
+  box-shadow:0 0 0 3px #fff, 0 0 16px rgba(255,255,255,.6) !important;
+  animation:selectedPulse 1s ease-in-out infinite;
+}
+@keyframes selectedPulse {
+  0%,100%{box-shadow:0 0 0 3px #fff,0 0 16px rgba(255,255,255,.6)}
+  50%{box-shadow:0 0 0 3px var(--gold),0 0 24px rgba(212,168,32,.8)}
+}
+.unit-marker.suppressed { opacity:.7; }
+.unit-marker.moved .um-counter { opacity:.7; }
+.um-counter {
+  width:40px; height:40px; border:2px solid; border-radius:3px;
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(0,0,0,.6);
+}
+.um-counter svg { width:28px; height:28px; }
+.um-pv-bar { width:40px; height:4px; background:rgba(0,0,0,.5); margin-top:2px; border-radius:2px; overflow:hidden; }
+.um-pv-fill { height:100%; transition:width .3s; border-radius:2px; }
+.um-name {
+  font-family:'Share Tech Mono',monospace; font-size:.55rem;
+  color:var(--cream); background:rgba(0,0,0,.7); padding:1px 3px;
+  margin-top:1px; white-space:nowrap; max-width:60px;
+  overflow:hidden; text-overflow:ellipsis; text-align:center;
+}
+.um-status {
+  font-family:'Share Tech Mono',monospace; font-size:.5rem;
+  background:rgba(255,170,0,.8); color:#000; padding:1px 3px;
+  margin-top:1px; text-align:center;
+}
+.um-status.moved-badge { background:rgba(68,136,255,.8); color:white; }
+
+/* OBJECTIVE PINS */
+.obj-pin {
+  text-align:center; position:relative;
+  filter:drop-shadow(0 2px 6px rgba(0,0,0,.8));
+}
+.obj-pin-vp {
+  width:22px; height:22px; background:var(--gold); color:#000;
+  border:2px solid #000; border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  font-family:'Bebas Neue',sans-serif; font-size:.85rem;
+  margin:0 auto; box-shadow:0 0 8px rgba(212,168,32,.5);
+}
+.obj-pin-name {
+  font-family:'Share Tech Mono',monospace; font-size:.5rem;
+  color:var(--gold); background:rgba(0,0,0,.8); padding:1px 3px;
+  margin-top:1px; white-space:nowrap; text-align:center;
+}
+
+/* LEAFLET POPUP */
+.leaflet-popup-content-wrapper {
+  background:rgba(10,20,10,.97) !important; border:1px solid var(--gold) !important;
+  border-radius:2px !important; box-shadow:0 4px 20px rgba(0,0,0,.8) !important;
+}
+.leaflet-popup-tip { background:var(--gold) !important; }
+.leaflet-popup-content { margin:10px 14px !important; color:var(--cream) !important; font-family:'Rajdhani',sans-serif !important; }
+.unit-popup { min-width:200px; }
+.up-title { font-family:'Bebas Neue',sans-serif; font-size:1.1rem; letter-spacing:2px; margin-bottom:2px; }
+.up-type { font-family:'Share Tech Mono',monospace; font-size:.65rem; color:var(--tan); margin-bottom:6px; text-transform:uppercase; }
+.up-stats { display:flex; gap:10px; font-size:.8rem; margin-bottom:6px; }
+.up-pv { font-size:.85rem; letter-spacing:1px; margin-bottom:4px; }
+.up-special { font-size:.68rem; color:var(--tan); line-height:1.4; margin-bottom:8px; border-left:2px solid var(--gold); padding-left:6px; }
+.up-actions { display:flex; gap:6px; }
+.up-btn { padding:5px 10px; border:none; font-family:'Share Tech Mono',monospace; font-size:.65rem; cursor:pointer; }
+.up-btn-move { background:rgba(68,136,255,.3); color:#88aaff; border:1px solid #4488ff; }
+.up-btn-atk  { background:rgba(204,34,34,.3); color:#ff8888; border:1px solid var(--red); }
+
+/* DICE MODAL */
+#dice-modal {
+  position:fixed; inset:0; z-index:8000;
+  background:rgba(0,0,0,.85); display:none;
+  align-items:center; justify-content:center;
+  backdrop-filter:blur(4px);
+}
+.dice-box {
+  background:var(--dark2); border:2px solid var(--gold);
+  padding:30px 40px; min-width:320px; text-align:center;
+  box-shadow:0 0 60px rgba(212,168,32,.3);
+}
+.dice-box-title {
+  font-family:'Bebas Neue',sans-serif; font-size:1.5rem;
+  letter-spacing:3px; color:var(--gold); margin-bottom:20px;
+}
+.dice-rolls { display:flex; gap:30px; justify-content:center; margin-bottom:16px; }
+.dice-side { text-align:center; }
+.dice-label { font-family:'Share Tech Mono',monospace; font-size:.7rem; color:var(--tan); margin-bottom:6px; }
+.dice-value {
+  font-family:'Bebas Neue',sans-serif; font-size:3rem;
+  color:var(--gold); min-width:60px; display:block;
+  animation:diceSpin .1s ease-in-out;
+}
+@keyframes diceSpin { 0%{transform:scale(1.3) rotate(-5deg)} 100%{transform:scale(1) rotate(0)} }
+.dice-result {
+  font-family:'Bebas Neue',sans-serif; font-size:1.8rem;
+  letter-spacing:3px; margin:10px 0;
+}
+.dice-result.hit { color:var(--red2); }
+.dice-result.miss { color:#44cc44; }
+.dice-damage { font-family:'Share Tech Mono',monospace; font-size:1rem; color:var(--tan2); margin-bottom:8px; }
+.dice-detail { font-size:.68rem; color:var(--tan); font-family:'Share Tech Mono',monospace; line-height:1.4; }
+
+/* EVENT MODAL */
+#event-modal {
+  position:fixed; inset:0; z-index:8000;
+  background:rgba(0,0,0,.85); display:none;
+  align-items:center; justify-content:center;
+  backdrop-filter:blur(4px);
+}
+.event-box {
+  background:var(--dark2); border:2px solid var(--gold);
+  border-top:5px solid var(--gold);
+  padding:28px 32px; min-width:300px; max-width:420px;
+  box-shadow:0 0 60px rgba(212,168,32,.3);
+  text-align:center;
+}
+.event-box-label {
+  font-family:'Share Tech Mono',monospace; font-size:.65rem;
+  letter-spacing:3px; color:var(--tan); margin-bottom:8px;
+}
+#em-title {
+  font-family:'Bebas Neue',sans-serif; font-size:2rem;
+  letter-spacing:3px; color:var(--gold); margin-bottom:12px;
+}
+#em-desc { font-size:.85rem; color:var(--tan2); line-height:1.6; margin-bottom:10px; }
+#em-escalade { font-family:'Share Tech Mono',monospace; font-size:.8rem; font-weight:bold; margin-bottom:16px; }
+.event-close {
+  background:var(--gold); color:#000; border:none; padding:8px 24px;
+  font-family:'Oswald',sans-serif; font-size:.9rem; font-weight:700;
+  letter-spacing:2px; cursor:pointer;
+}
+
+/* GAME OVER */
+#gameover-overlay {
+  position:fixed; inset:0; z-index:9000;
+  background:rgba(0,0,0,.9); display:none;
+  align-items:center; justify-content:center;
+  flex-direction:column; gap:20px;
+  backdrop-filter:blur(8px);
+}
+#go-title {
+  font-family:'Bebas Neue',sans-serif;
+  font-size:clamp(3rem,8vw,6rem);
+  letter-spacing:6px; color:var(--gold);
+  text-shadow:0 0 60px rgba(212,168,32,.6);
+  text-align:center;
+}
+#go-subtitle {
+  font-family:'Share Tech Mono',monospace;
+  font-size:1rem; color:var(--tan); letter-spacing:2px; text-align:center;
+}
+.go-btn {
+  background:var(--gold); color:#000; border:none; padding:12px 32px;
+  font-family:'Oswald',sans-serif; font-size:1rem; font-weight:700;
+  letter-spacing:3px; cursor:pointer;
+}
+
+/* TOAST */
+.toast {
+  position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(100px);
+  background:var(--dark2); border:1px solid var(--gold); color:var(--cream);
+  padding:10px 20px; font-family:'Share Tech Mono',monospace; font-size:.78rem;
+  z-index:9999; transition:transform .3s ease;
+  box-shadow:0 4px 20px rgba(0,0,0,.6);
+}
+.toast.show { transform:translateX(-50%) translateY(0); }
+.toast-error { border-color:var(--red2); color:#ff8888; }
+.toast-success { border-color:#44ff44; color:#88ff88; }
+.toast-warning { border-color:#ffaa00; color:#ffcc44; }
+
+/* SCROLLBAR */
+::-webkit-scrollbar { width:4px; }
+::-webkit-scrollbar-track { background:var(--dark2); }
+::-webkit-scrollbar-thumb { background:var(--gold); }
+
+/* MAP WRAPPER POSITION */
+.map-wrapper { position:relative; flex:1; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════ LOBBY ═══════════════════════════ -->
+<div id="lobby">
+  <div class="lobby-bg"></div>
+  <div class="lobby-title">SOUTH CHINA SEA CRISIS</div>
+  <div class="lobby-subtitle">▶ WARGAME STRATÉGIQUE MULTIJOUEUR — 2025 ◀</div>
+
+  <div class="lobby-cards">
+    <!-- LOCAL -->
+    <div class="lobby-card">
+      <div class="lc-title">🖥️ Jeu Local</div>
+      <div class="lc-desc">2 joueurs sur le même écran. Passez le clavier à votre adversaire. Aucune connexion requise.</div>
+      <button class="lc-btn" onclick="startLocalGame()">JOUER EN LOCAL</button>
+    </div>
+
+    <!-- CREATE ONLINE -->
+    <div class="lobby-card" id="lobby-create">
+      <div class="lc-title">🌐 Créer une Partie</div>
+      <div class="lc-desc">Créez une salle en ligne et partagez le code à votre adversaire.</div>
+      <select class="lc-select" id="create-faction-select">
+        <option value="pla">🔴 PLA — CHINE</option>
+        <option value="us">🔵 INDOPACOM — USA</option>
+      </select>
+      <button class="lc-btn red" onclick="startOnlineCreate(document.getElementById('create-faction-select').value)">CRÉER LA SALLE</button>
+      <div style="font-size:.65rem;color:#666;font-family:Share Tech Mono,monospace;margin-top:4px">
+        ⚠️ Configurer Firebase dans le code d'abord
+      </div>
+    </div>
+
+    <!-- JOIN ONLINE -->
+    <div class="lobby-card">
+      <div class="lc-title">🔗 Rejoindre</div>
+      <div class="lc-desc">Entrez le code de salle fourni par l'hôte.</div>
+      <input class="lc-input" id="join-code-input" placeholder="CODE (ex: AB12CD)" maxlength="6"/>
+      <select class="lc-select" id="join-faction-select">
+        <option value="us">🔵 INDOPACOM — USA</option>
+        <option value="pla">🔴 PLA — CHINE</option>
+      </select>
+      <button class="lc-btn blue" onclick="startOnlineJoin()">REJOINDRE</button>
+    </div>
+
+    <!-- WAITING -->
+    <div class="lobby-card" id="lobby-waiting">
+      <div class="lc-title">⏳ En attente...</div>
+      <div class="lc-desc">Partagez ce code à votre adversaire :</div>
+      <div id="room-code-display">——</div>
+      <div class="lc-desc" style="font-size:.7rem">La partie démarre automatiquement quand les 2 joueurs sont connectés.</div>
+    </div>
+  </div>
+
+  <!-- Firebase instructions -->
+  <div style="margin-top:24px;max-width:560px;text-align:center;font-family:Share Tech Mono,monospace;font-size:.65rem;color:#555;line-height:1.8;position:relative;z-index:1">
+    MULTIJOUEUR EN LIGNE : 1) Créer un projet sur firebase.google.com → Realtime Database → Mode test<br>
+    2) Copier la config dans FIREBASE_CONFIG en haut du code JavaScript · 3) Héberger ce fichier HTML<br>
+    Le jeu local fonctionne <b style="color:#888">sans Firebase</b> — cliquez "Jouer en local" directement
+  </div>
+</div>
+
+<!-- ═══════════════════════════ GAME ═══════════════════════════ -->
+<div id="game-container">
+  <!-- HUD -->
+  <div class="game-hud">
+    <div class="hud-title">SCS CRISIS</div>
+    <div class="hud-divider"></div>
+    <div class="hud-item"><span>TOUR</span><b id="hud-turn">1/10</b></div>
+    <div class="hud-divider"></div>
+    <div class="hud-item"><span>PHASE</span><b id="hud-phase">INITIATIVE</b></div>
+    <div class="hud-divider"></div>
+    <div class="hud-item"><span>SCORE</span><b id="hud-vp">PV: 15</b></div>
+    <div class="hud-divider"></div>
+    <div class="hud-item"><span>INIT.</span><b id="hud-initiative">—</b></div>
+    <div class="hud-spacer"></div>
+    <div class="hud-faction-badge local" id="player-badge">LOCAL</div>
+  </div>
+
+  <div class="game-body">
+    <!-- LEFT PANEL -->
+    <div class="panel-left">
+      <div class="panel-section" id="phase-panel-wrap">
+        <div class="panel-section-title">⚡ PHASE EN COURS</div>
+        <div id="phase-panel"></div>
+      </div>
+      <div class="panel-section">
+        <div class="panel-section-title">📦 RESSOURCES</div>
+        <div id="resource-panel"></div>
+      </div>
+      <div class="panel-section">
+        <div class="panel-section-title">☢️ ESCALADE</div>
+        <div id="escalade-bar"></div>
+      </div>
+      <div class="panel-section" style="flex:1;overflow:hidden">
+        <div class="panel-section-title">🎯 UNITÉ SÉLECT.</div>
+        <div id="unit-detail" style="padding-top:4px">
+          <div style="color:var(--tan);font-size:.72rem;font-family:Share Tech Mono,monospace">
+            Cliquez une unité sur la carte pour afficher ses détails et options.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MAP -->
+    <div class="map-wrapper">
+      <div id="game-map"></div>
+      <!-- Map controls overlay -->
+      <div class="map-controls-bar">
+        <button class="mcb-btn" onclick="toggleMapLayer('satellite')">🛰️ SAT</button>
+        <button class="mcb-btn" onclick="toggleMapLayer('dark')">🌑 DARK</button>
+        <button class="mcb-btn" onclick="toggleHexGrid()">⬡ HEX</button>
+        <button class="mcb-btn" onclick="mapInstance&&mapInstance.setView([12,115],5)">🌏 ZOOM OUT</button>
+        <button class="mcb-btn" onclick="mapInstance&&mapInstance.setView([9.7,113.5],8)">🏝️ SPRATLEYS</button>
+        <button class="mcb-btn" onclick="mapInstance&&mapInstance.setView([9.555,112.895],13)">⚑ FIERY CROSS</button>
+      </div>
+    </div>
+
+    <!-- RIGHT PANEL -->
+    <div class="panel-right">
+      <div class="panel-section" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+        <div class="panel-section-title">📋 JOURNAL DE JEU</div>
+        <div id="game-log"></div>
+      </div>
+      <div class="chat-area">
+        <div class="panel-section-title" style="padding:8px 10px 4px">💬 CHAT</div>
+        <div id="chat-messages"></div>
+        <div class="chat-input-row">
+          <input id="chat-input" placeholder="Message..." onkeydown="if(event.key==='Enter')sendChatMsg()"/>
+          <button class="chat-send" onclick="sendChatMsg()">►</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- DICE MODAL -->
+<div id="dice-modal">
+  <div class="dice-box">
+    <div class="dice-box-title">⚔️ RÉSOLUTION COMBAT</div>
+    <div class="dice-rolls">
+      <div class="dice-side">
+        <div class="dice-label">ATTAQUE 2D6+ATK</div>
+        <span class="dice-value" id="dice-atk">?</span>
+      </div>
+      <div class="dice-side" style="display:flex;align-items:center;font-size:1.5rem;color:var(--gold)">VS</div>
+      <div class="dice-side">
+        <div class="dice-label">DÉFENSE 2D6+DEF</div>
+        <span class="dice-value" id="dice-def">?</span>
+      </div>
+    </div>
+    <div class="dice-result" id="dice-result">—</div>
+    <div class="dice-damage" id="dice-damage"></div>
+    <div class="dice-detail" id="dice-detail"></div>
+  </div>
+</div>
+
+<!-- EVENT MODAL -->
+<div id="event-modal">
+  <div class="event-box">
+    <div class="event-box-label">🃏 CARTE ÉVÉNEMENT</div>
+    <div id="em-title">—</div>
+    <div id="em-desc"></div>
+    <div id="em-escalade"></div>
+    <button class="event-close" onclick="closeEventModal()">APPLIQUER</button>
+  </div>
+</div>
+
+<!-- GAME OVER -->
+<div id="gameover-overlay">
+  <div id="go-title">—</div>
+  <div id="go-subtitle"></div>
+  <button class="go-btn" onclick="restartGame()">REJOUER</button>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+</body>
+</html>
